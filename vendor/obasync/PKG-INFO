@@ -1,0 +1,27 @@
+Metadata-Version: 1.1
+Name: obasync
+Version: 0.10
+Summary: Office Basic macro source synchronizer
+Home-page: https://pypi.python.org/pypi/obasync
+Author: imacat
+Author-email: imacat@mail.imacat.idv.tw
+License: Apache License, Version 2.0
+Description: UNKNOWN
+Keywords: OpenOffice,LibreOffice,uno,Basic,macro
+Platform: Linux
+Platform: MS-Windows
+Platform: MacOS X
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: MacOS :: MacOS X
+Classifier: Operating System :: Microsoft :: Windows
+Classifier: Operating System :: POSIX :: Linux
+Classifier: Programming Language :: Python :: 2
+Classifier: Programming Language :: Python :: 2.7
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.5
+Classifier: Topic :: Office/Business :: Office Suites
+Classifier: Topic :: Text Editors :: Integrated Development Environments (IDE)
+Classifier: Topic :: Utilities

@@ -1,0 +1,879 @@
+#! /opt/openoffice4/program/python
+# -*- coding: utf-8 -*-
+# Office Basic macro source synchronizer.
+#   by imacat <imacat@mail.imacat.idv.tw>, 2016-08-31
+
+#  Copyright (c) 2016-2017 imacat.
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+"""Synchronize Office Basic macro source.
+
+obasync is an OpenOffice/LibreOffice Basic macro source synchronizer.
+It synchronizes your Basic macros with your local project files.
+
+Given the following source files:
+
+* Directory: MyApp
+* Files: MyMacros.vb Utils.vb Registry.vb Data.vb
+
+Running "obasync" will synchronize them with the following Basic
+macros:
+
+* Library: MyApp
+* Modules: MyMacros Utils Registry Data
+
+If the Basic library MyApp does not exist, it will be created.
+Missing modules will be added, and excess modules will be removed.
+
+On the other hand, given the following Basic macros:
+
+* Library: MyApp
+* Modules: MyMacros Utils Registry Data
+
+Running "obasync --get" will synchronize them with the following
+source files:
+
+* Directory: MyApp
+* Files: MyMacros.vb Utils.vb Registry.vb Data.vb
+
+Missing source files will be added, and excess source files will be
+deleted.
+
+SYNOPSIS
+
+  obasync [options] [DIRECTORY [LIBRARY]]
+
+DIRECTORY       The project source directory.  Default to the current
+                working directory.
+
+LIBRARY         The name of the Basic library.  Default to the same
+                name as the project source directory.
+
+--get           Download (check out) the macros from the
+                OpenOffice/LibreOffice Basic storage to the source
+                files, instead of upload (check in).  By default it
+                uploads the source files onto the
+                OpenOffice/LibreOffice Basic storage.
+
+--set-passwd    Sets the password of the library after upload.  Supply
+                nothing when prompting the new password to remove the
+                password protection.  This does not work with --get.
+
+-p, --port N    The TCP port to communicate with
+                OpenOffice/LibreOffice.  The default is 2002.  You can
+                change it if port 2002 is already in use.
+
+-x, --ext .EXT  The file name extension of the source files.  The
+                default is ".vb".  This may be used for your
+                convenience of editor syntax highlighting.
+
+-e, --encoding CS
+                The encoding of the source files.  The default is
+                system-dependent.  For example, on Traditional Chinese
+                MS-Windows, this will be CP950 (Big5).  You can change
+                this to UTF-8 for convenience if you
+                obtain/synchronize your source code from other
+                sources.
+
+-r, --run MODULE.MACRO
+                Run he specific macro after synchronization, for
+                convenience.
+
+--user          Store the macros in the user macro storage.  (default)
+
+--doc           Store the macros in the document macro storage.
+
+--target TARGET The target storage document if there are more than one
+                opened documents.  You may specify a partial path, or
+                as "Untitied 1" (in your language) if it is a new
+                file.
+
+-h, --help      Show the help message and exit
+
+-v, --version   Show program’s version number and exit
+"""
+
+from __future__ import print_function
+import argparse
+import getpass
+import os
+import sys
+import time
+import locale
+
+
+def append_uno_path():
+    """Append the path of the uno module to the import path."""
+    for p in sys.path:
+        if os.path.exists(os.path.join(p, "uno.py")):
+            return
+    # For uno.py on MacOS
+    cand = "/Applications/OpenOffice.app/Contents/MacOS"
+    if os.path.exists(os.path.join(cand, "uno.py")):
+        sys.path.append(cand)
+        return
+    # Find uno.py for MS-Windows
+    cand = sys.executable
+    while cand != os.path.dirname(cand):
+        cand = os.path.dirname(cand)
+        if os.path.exists(os.path.join(cand, "uno.py")):
+            sys.path.append(cand)
+            return
+
+append_uno_path()
+import uno
+from com.sun.star.connection import NoConnectException
+from com.sun.star.lang import IllegalArgumentException
+
+
+def main():
+    """The main program."""
+    t_start = time.time()
+    global args
+
+    # Parses the arguments
+    parse_args()
+
+    # Downloads the macros from OpenOffice/LibreOffice Basic
+    if args.get:
+        oo = Office(args.port)
+        storage = find_storage(oo, args.storage_type, args.target)
+        modules = read_basic_modules(storage, args.library)
+        if len(modules) == 0:
+            print("ERROR: Library %s does not exist" % args.library,
+                  file=sys.stderr)
+            return
+        update_source_dir(
+            args.projdir, modules, args.ext, args.encoding)
+
+    # Uploads the macros onto OpenOffice/LibreOffice Basic
+    else:
+        modules = read_in_source_dir(
+            args.projdir, args.ext, args.encoding)
+        if len(modules) == 0:
+            print("ERROR: Found no source macros in %s" %
+                  args.projdir,
+                  file=sys.stderr)
+            return
+        oo = Office(args.port)
+        storage = find_storage(oo, args.storage_type, args.target)
+        update_basic_modules(storage, args.library, modules, args.setpass)
+        if args.run is not None:
+            run_macro(storage, args.library, args.run)
+
+    print("Done.  %02d:%02d elapsed." %
+          (int((time.time() - t_start) / 60),
+           (time.time() - t_start) % 60), file=sys.stderr)
+
+
+def parse_args():
+    """Parse the arguments."""
+    global args
+
+    parser = argparse.ArgumentParser(
+        description=("Synchronize the local Basic scripts"
+                     " with OpenOffice/LibreOffice Basic."))
+    parser.add_argument(
+        "projdir", metavar="DIR", nargs="?", default=os.getcwd(),
+        help=("The project source directory"
+              " (default to the current directory)."))
+    parser.add_argument(
+        "library", metavar="LIBRARY", nargs="?",
+        help=("The Library to upload/download the macros"
+              " (default to the name of the directory)."))
+    parser.add_argument(
+        "--get", action="store_true",
+        help="Downloads the macros instead of upload.")
+    parser.add_argument(
+        "--set-passwd", dest="setpass", action="store_true",
+        help=("Sets the password of the library after upload.  "
+              "This does not work with --get."))
+    parser.add_argument(
+        "-p", "--port", metavar="N", type=int, default=2002,
+        help=("The TCP port to communicate with "
+              "OpenOffice/LibreOffice with (default: %(default)s)"))
+    parser.add_argument(
+        "-x", "--ext", metavar=".EXT", default=".vb",
+        help=("The file name extension of the source files.  "
+              "(default: %(default)s)"))
+    parser.add_argument(
+        "-e", "--encoding", metavar="CS",
+        default=locale.getpreferredencoding(),
+        help=("The encoding of the source files.  "
+              "(default: %(default)s)"))
+    parser.add_argument(
+        "-r", "--run", metavar="MODULE.MACRO",
+        help="The macro to run after the upload, if any.")
+    parser.add_argument(
+        "--user", dest="storage_type",
+        action="store_const", const="user",
+        help="Store the macros in the user macro storage.  (default)")
+    parser.add_argument(
+        "--doc", dest="storage_type",
+        action="store_const", const="doc",
+        help="Store the macros in the document macro storage.")
+    parser.add_argument(
+        "--target", metavar="TARGET",
+        help=("The target storage document if there are more than one"
+              " opened documents.  You may specify a partial path, or"
+              " an \"Untitied 1\" (in your language) if it is a new"
+              " file."))
+    parser.add_argument(
+        "-v", "--version", action="version", version="%(prog)s 0.10")
+    args = parser.parse_args()
+
+    # Obtain the absolute path
+    args.projdir = os.path.abspath(args.projdir)
+    # Obtain the library name from the path
+    if args.library is None:
+        args.library = os.path.basename(args.projdir)
+    # Adjust the file name extension.
+    if args.ext[0] != ".":
+        args.ext = "." + args.ext
+
+    if args.storage_type is None:
+        args.storage_type = "user"
+    # For Python 2 only.
+    # Paths are understood locally, despite of the content encoding.
+    if sys.version_info.major == 2:
+        if args.target is not None:
+            args.target = args.target.decode(locale.getpreferredencoding())
+
+    if args.get and args.setpass:
+        print("ERROR: --get does not work with --set-passwd.",
+              file=sys.stderr)
+        sys.exit(1)
+    return
+
+
+def find_storage(oo, type, target):
+    """Finds the macro storage to store the macros.
+
+    Arguments:
+        type: The storage type, either "user" or "doc".
+        target: The file path to locate the storing document if there
+                are more than one opened documents.  A partial path
+                is OK.
+
+    Returns:
+        The storage to save the macros, as a Storage object.
+    """
+    if type == "user":
+        storage = Storage()
+        storage.type = type
+        storage.oo = oo
+        storage.doc = None
+        storage.libs = oo.service_manager.createInstance(
+            "com.sun.star.script.ApplicationScriptLibraryContainer")
+        return storage
+    elif type == "doc":
+        storage = Storage()
+        storage.type = type
+        storage.oo = oo
+        storage.doc = find_doc(oo, target)
+        storage.libs = storage.doc.getPropertyValue("BasicLibraries")
+        return storage
+    else:
+        return None
+
+
+def find_doc(oo, target):
+    """Find the target opened document by a partial path.
+
+    Arguments:
+        target: A partial path of the document.
+
+    Returns:
+        If there is only one opened document, it is returned.  If
+        there are more than one opened document, the document whose
+        file path matches the "target" is returned.  Otherwise, if
+        no matching document or more than one matching document are
+        found, the program exists with an error.
+    """
+    # Checks the opened documents
+    enum = oo.desktop.getComponents().createEnumeration()
+    opened = []
+    while enum.hasMoreElements():
+        component = enum.nextElement()
+        if component.supportsService(
+                "com.sun.star.document.OfficeDocument"):
+            opened.append(component)
+    if len(opened) == 0:
+        print("ERROR: Found no opened document to store the macros",
+              file=sys.stderr)
+        sys.exit(1)
+    file_content_provider = oo.service_manager.createInstance(
+        "com.sun.star.ucb.FileContentProvider")
+    # There are opened documents.
+    if target is None:
+        if len(opened) == 1:
+            return opened[0]
+        print("ERROR: There are more than one opened documens.  "
+              "Please specify the file path.",
+              file=sys.stderr)
+        for path in get_doc_paths(opened, file_content_provider):
+            print("* %s" % path, file=sys.stderr)
+        sys.exit(1)
+    matched = []
+    for doc in opened:
+        if doc.hasLocation():
+            path = file_content_provider.getSystemPathFromFileURL(
+                doc.getLocation())
+        else:
+            path = doc.getTitle()
+        if path.find(target) >= 0:
+            matched.append(doc)
+    if len(matched) == 1:
+        return matched[0]
+    elif len(matched) == 0:
+        print("ERROR: Found no matching document to store the macros.",
+              file=sys.stderr)
+        print("Opened documents:", file=sys.stderr)
+        for path in get_doc_paths(opened, file_content_provider):
+            print("* %s" % path, file=sys.stderr)
+        sys.exit(1)
+    else:
+        print("ERROR: There are more than one matching documents.",
+              file=sys.stderr)
+        print("Matching documents:", file=sys.stderr)
+        for path in get_doc_paths(matched, file_content_provider):
+            print("* %s" % path, file=sys.stderr)
+        sys.exit(1)
+
+
+def get_doc_paths(docs, file_content_provider):
+    """Returns the paths (or the titles) of the documents.
+
+    Arguments:
+        docs: A list of office documents.
+        file_content_provider: A FileContentProvider service instance.
+
+    Returns:
+        A list of paths, or the titles if there is no path yet,
+        of the documents.
+    """
+    paths = []
+    for doc in docs:
+        if doc.hasLocation():
+            paths.append(
+                file_content_provider.getSystemPathFromFileURL(
+                    doc.getLocation()))
+        else:
+            paths.append(doc.getTitle())
+    return sorted(paths)
+
+
+def read_in_source_dir(projdir, ext, encoding):
+    """Read-in the source files.
+
+    Arguments:
+        projdir: The project source directory.
+        ext: The file name extension of the source files, beginning
+            with a single dot ".".
+        encoding: The encoding of the source file.
+
+    Returns:
+        The Basic modules that read, as a dictionary.  The keys of the
+        dictionary are the module names, and the values of the
+        dictionary are the module contents.
+    """
+    modules = {}
+    for entry in os.listdir(projdir):
+        path = os.path.join(projdir, entry)
+        if os.path.isfile(path) \
+                and entry.lower().endswith(ext.lower()):
+            modname = entry[0:-len(ext)]
+            modules[modname] = read_file(path, encoding)
+    return modules
+
+
+def update_source_dir(projdir, modules, ext, encoding):
+    """Update the source files.
+
+    Arguments:
+        projdir: The project source directory.
+        modules: The Basic modules, as a dictionary.  The keys of
+            the dictionary are the module names, and the values of
+            the dictionary are the module contents.
+        ext: The file name extension of the source files, beginning
+            with a single dot ".".
+        encoding: The encoding of the source file.
+    """
+    curmods = {}
+    is_in_sync = True
+    for entry in os.listdir(projdir):
+        path = os.path.join(projdir, entry)
+        if os.path.isfile(path) \
+                and entry.lower().endswith(ext.lower()):
+            modname = entry[0:-len(ext)]
+            curmods[modname] = entry
+    for modname in sorted(modules.keys()):
+        if modname not in curmods:
+            path = os.path.join(projdir, modname + ext)
+            write_file(path, modules[modname], encoding)
+            print("%s added." % (modname + ext), file=sys.stderr)
+            is_in_sync = False
+        else:
+            path = os.path.join(projdir, curmods[modname])
+            if update_file(path, modules[modname], encoding):
+                print("%s updated." % curmods[modname],
+                      file=sys.stderr)
+                is_in_sync = False
+    for modname in sorted(curmods.keys()):
+        if modname not in modules:
+            path = os.path.join(projdir, curmods[modname])
+            os.remove(path)
+            print("%s removed." % curmods[modname], file=sys.stderr)
+            is_in_sync = False
+    if is_in_sync:
+        print("Everything is in sync.", file=sys.stderr)
+    return
+
+
+def read_basic_modules(storage, libname):
+    """
+    Read the OpenOffice/LibreOffice Basic macros from the macro
+    storage.
+
+    Arguments:
+        storage: The Basic macro storage, as a Storage object.
+        libname: The name of the Basic library.
+
+    Returns:
+        The Basic modules that read, as a dictionary.  The keys of the
+        dictionary are the module names, and the values of the
+        dictionary are the module contents.
+    """
+    modules = {}
+    if not storage.libs.hasByName(libname):
+        return modules
+    verify_library_password(storage, libname)
+    storage.libs.loadLibrary(libname)
+    library = storage.libs.getByName(libname)
+    for modname in library.getElementNames():
+        modules[modname] = library.getByName(modname)
+    return modules
+
+
+def update_basic_modules(storage, libname, modules, setpass):
+    """Update the OpenOffice/LibreOffice Basic macro storage.
+
+    Arguments:
+        storage: The Basic macro storage, as a Storage object.
+        libname: The name of the Basic library.
+        modules: The Basic modules, as a dictionary.  The keys of
+            the dictionary are the module names, and the values of
+            the dictionary are the module contents.
+    """
+    if not storage.libs.hasByName(libname):
+        storage.libs.createLibrary(libname)
+        print("Script library %s created." % libname, file=sys.stderr)
+        create_dialog_library(storage, libname)
+        if setpass:
+            set_library_password(storage, libname)
+        verify_library_password(storage, libname)
+        library = storage.libs.getByName(libname)
+        for modname in sorted(modules.keys()):
+            library.insertByName(modname, modules[modname])
+            print("Module %s added." % modname, file=sys.stderr)
+    else:
+        if setpass:
+            set_library_password(storage, libname)
+        verify_library_password(storage, libname)
+        storage.libs.loadLibrary(libname)
+        library = storage.libs.getByName(libname)
+        # As of OpenOffice 4.1.3, when there is no modules in the
+        # document storage, it returns a zero-length byte sequence
+        # instead of an empty string list.
+        # The byte sequence cannot be sorted directly.
+        curmods = library.getElementNames()
+        if len(curmods) == 0:
+            curmods = []
+        curmods = sorted(curmods)
+        for modname in sorted(modules.keys()):
+            if modname not in curmods:
+                library.insertByName(modname, modules[modname])
+                print("Module %s added." % modname, file=sys.stderr)
+            elif modules[modname] != library.getByName(modname):
+                library.replaceByName(modname, modules[modname])
+                print("Module %s updated." % modname, file=sys.stderr)
+        for modname in curmods:
+            if modname not in modules:
+                library.removeByName(modname)
+                print("Module %s removed." % modname, file=sys.stderr)
+    if storage.libs.isModified():
+        storage.libs.storeLibraries()
+    else:
+        print("Everything is in sync.", file=sys.stderr)
+    return
+
+
+def create_dialog_library(storage, libname):
+    """Create the dialog library.
+
+    Arguments:
+        storage: The Basic macro storage, as a Storage object.
+        libname: The name of the dialog library.
+    """
+    if storage.type is "user":
+        libraries = storage.oo.service_manager.createInstance(
+            "com.sun.star.script.ApplicationDialogLibraryContainer")
+    else:
+        libraries = storage.doc.getPropertyValue("DialogLibraries")
+    libraries.createLibrary(libname)
+    print("Dialog library %s created." % libname, file=sys.stderr)
+    libraries.storeLibraries()
+
+
+def verify_library_password(storage, libname):
+    """Verify the password for the library.
+
+    Arguments:
+        storage: The Basic macro storage, as a Storage object.
+        libname: The name of the dialog library.
+    """
+    if not storage.libs.isLibraryPasswordProtected(libname):
+        return
+    if storage.libs.isLibraryPasswordVerified(libname):
+        return
+    while True:
+        password = getpass.getpass("Password: ")
+        if storage.libs.verifyLibraryPassword(libname, password):
+            return
+        print("ERROR: Failed password for library %s." % libname,
+              file=sys.stderr)
+    return
+
+
+def set_library_password(storage, libname):
+    """Sets the password of the library.
+
+    Arguments:
+        storage: The Basic macro storage, as a Storage object.
+        libname: The name of the dialog library.
+    """
+    if not storage.libs.isLibraryPasswordProtected(libname):
+        while True:
+            newpass = getpass.getpass("New password: ")
+            newpass2 = getpass.getpass("Repeat new password: ")
+            if newpass != newpass2:
+                print("ERROR: Two new passwords are not the same.",
+                      file=sys.stderr)
+                continue
+            else:
+                break
+        storage.libs.changeLibraryPassword(libname, "", newpass)
+        return
+    else:
+        while True:
+            oldpass = getpass.getpass("Old password: ")
+            if oldpass == "":
+                print("ERROR: Please enter the old password.",
+                      file=sys.stderr)
+                continue
+            tmppass = oldpass + "tmp"
+            try:
+                storage.libs.changeLibraryPassword(
+                    libname, oldpass, tmppass)
+            except IllegalArgumentException:
+                print("ERROR: Incorrect old password.",
+                      file=sys.stderr)
+                continue
+            else:
+                storage.libs.changeLibraryPassword(
+                    libname, tmppass, oldpass)
+                break
+        while True:
+            newpass = getpass.getpass("New password: ")
+            newpass2 = getpass.getpass("Repeat new password: ")
+            if newpass != newpass2:
+                print("ERROR: Two new passwords are not the same.",
+                      file=sys.stderr)
+                continue
+            else:
+                break
+        storage.libs.changeLibraryPassword(libname, oldpass, newpass)
+        return
+
+
+def run_macro(storage, libname, macro):
+    """Run a Basic macro.
+
+    Arguments:
+        storage: The Basic macro storage, as a Storage object.
+        libname: The name of the dialog library.
+        macro:   The The macro to run.
+    """
+    if storage.type is "user":
+        factory = storage.oo.service_manager.DefaultContext.getByName(
+            "/singletons/com.sun.star.script.provider."
+            "theMasterScriptProviderFactory")
+        provider = factory.createScriptProvider("")
+        script = provider.getScript(
+            "vnd.sun.star.script:%s.%s"
+            "?language=Basic&location=application" %
+            (args.library, args.run))
+        script.invoke((), (), ())
+    else:
+        provider = storage.doc.getScriptProvider()
+        script = provider.getScript(
+            "vnd.sun.star.script:%s.%s"
+            "?language=Basic&location=document" %
+            (args.library, args.run))
+        script.invoke((), (), ())
+
+
+def read_file(path, encoding):
+    """Read a file, and deals with Python 3 / 2 compatibility.
+
+    Arguments:
+        path: The full path of the file.
+        encoding: The encoding of the file.
+
+    Returns:
+        The content of the file.
+    """
+    if sys.version_info.major == 2:
+        f = open(path)
+        content = f.read().decode(encoding).replace("\r\n", "\n")
+        f.close()
+    else:
+        f = open(path, encoding=encoding)
+        content = f.read().replace("\r\n", "\n")
+        f.close()
+    return content
+
+
+def write_file(path, content, encoding):
+    """Write to a file, and deals with Python 3 / 2 compatibility.
+
+    Arguments:
+        path: The full path of the file.
+        content: The content of the file.
+        encoding: The encoding of the file.
+    """
+    if sys.version_info.major == 2:
+        f = open(path, "w")
+        f.write(content.encode(encoding))
+        f.close()
+    else:
+        f = open(path, "w", encoding=encoding)
+        f.write(content)
+        f.close()
+    return
+
+
+def update_file(path, content, encoding):
+    """Update a file, and deals with Python 3 / 2 compatibility.
+
+    The file will only be update if its content is different from
+    the supplied content.
+
+    Arguments:
+        path: The full path of the file.
+        content: The new content of the file.
+        encoding: The encoding of the file.
+
+    Returns:
+        True if the file is updated, or False otherwise.
+    """
+    is_updated = False
+    if sys.version_info.major == 2:
+        f = open(path, "r+")
+        if content != f.read().decode(encoding).replace("\r\n", "\n"):
+            f.seek(0)
+            f.truncate(0)
+            f.write(content.encode(encoding))
+            is_updated = True
+        f.close()
+    else:
+        f = open(path, "r+", encoding=encoding)
+        if content != f.read().replace("\r\n", "\n"):
+            f.seek(0)
+            f.truncate(0)
+            f.write(content)
+            is_updated = True
+        f.close()
+    return is_updated
+
+
+class Storage:
+    """A Basic macro storage.
+
+    Attributes:
+        oo: The office connection, as an Office() object.
+        doc: The office document component to store the macros.
+        libs: The Basic macro storage of the document.
+    """
+    pass
+
+
+class Office:
+    """The OpenOffice/LibreOffice connection.
+
+    Attributes:
+        port: The TCP port that is used to communicate with the
+            OpenOffice/LibreOffice process.  OpenOffice/LibreOffice
+            will listen to this port.
+        bootstrap_context: The bootstrap context of the
+            OpenOffice/LibreOffice desktop.
+        service_manager: The service manager of the
+            OpenOffice/LibreOffce desktop.
+        desktop: The OpenOffice/LibreOffice desktop object.
+    """
+
+    def __init__(self, port=2002):
+        """Initialize the OpenOffice/LibreOffice connection.
+
+        Arguments:
+            port: The TCP port to communicate with
+                OpenOffice/LibreOffice with.  OpenOffice/LibreOffice
+                will start to listen on this port if it is not
+                listening on this port not yet.  The default is
+                port 2002.  Change it to another port if port 2002 is
+                already in use.
+        """
+        self.port = port
+        self.bootstrap_context = None
+        self.service_manager = None
+        self.desktop = None
+        self.__connect()
+
+    def __connect(self):
+        """Connect to the running OpenOffice/LibreOffice process.
+
+        Run OpenOffice/LibreOffice in server listening mode if it is
+        not running yet.
+        """
+        # Obtain the local context
+        local_context = uno.getComponentContext()
+        # Obtain the local service manager
+        local_service_manager = local_context.getServiceManager()
+        # Obtain the URL resolver
+        url_resolver = local_service_manager.createInstanceWithContext(
+            "com.sun.star.bridge.UnoUrlResolver", local_context)
+        # Obtain the context
+        url = ("uno:socket,host=localhost,port=%d;"
+               "urp;StarOffice.ComponentContext") % self.port
+        while True:
+            try:
+                self.bootstrap_context = url_resolver.resolve(url)
+            except NoConnectException:
+                self.__start_oo()
+            else:
+                break
+        # Obtain the service manager
+        self.service_manager = self.bootstrap_context.getServiceManager()
+        # Obtain the desktop service
+        self.desktop = self.service_manager.createInstanceWithContext(
+            "com.sun.star.frame.Desktop", self.bootstrap_context)
+
+    def __start_oo(self):
+        """Start OpenOffice/LibreOffice in server listening mode."""
+        # For MS-Windows, which does not have fork()
+        if os.name == "nt":
+            from subprocess import Popen
+            soffice = os.path.join(
+                os.path.dirname(uno.__file__), "soffice.exe")
+            DETACHED_PROCESS = 0x00000008
+            Popen([soffice,
+                   "-accept=socket,host=localhost,port=%d;urp;" %
+                   self.port],
+                  close_fds=True, creationflags=DETACHED_PROCESS)
+            time.sleep(2)
+            return
+
+        # For POSIX systems, including Linux and MacOSX
+        try:
+            pid = os.fork()
+        except OSError:
+            print("Failed to fork().", file=sys.stderr)
+            sys.exit(1)
+        if pid != 0:
+            time.sleep(2)
+            return
+        os.setsid()
+        soffice = self.__find_posix_soffice()
+        if soffice is None:
+            print("Failed to find the "
+                  "OpenOffice/LibreOffice installation.",
+                  file=sys.stderr)
+            sys.exit(1)
+        param = "-accept=socket,host=localhost,port=%d;urp;" % \
+            self.port
+        # LibreOffice on POSIX systems uses --accept instead of
+        # -accept now.
+        if self.__is_soffice_lo(soffice):
+            param = "-" + param
+        try:
+            os.execl(soffice, soffice, param)
+        except OSError:
+            print("%s: Failed to run the"
+                  " OpenOffice/LibreOffice server." % soffice,
+                  file=sys.stderr)
+            sys.exit(1)
+
+    def __find_posix_soffice(self):
+        """Find soffice on POSIX systems (Linux or MacOSX).
+
+        Returns:
+            The found soffice executable, or None if not found.
+        """
+        # Check soffice in the same directory of uno.py
+        # This works for Linux OpenOffice/LibreOffice local
+        # installation, and OpenOffice on MacOSX.
+        soffice = os.path.join(
+            os.path.dirname(uno.__file__), "soffice")
+        if os.path.exists(soffice):
+            return soffice
+
+        # Now we have LibreOffice on MacOSX and Linux
+        # OpenOffice/LibreOffice vender installation.
+
+        # LibreOffice on MacOSX.
+        soffice = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        if os.path.exists(soffice):
+            return soffice
+
+        # Linux OpenOffice/LibreOffice vender installation.
+        soffice = "/usr/bin/soffice"
+        if os.path.exists(soffice):
+            return soffice
+
+        # Not found
+        return None
+
+    def __is_soffice_lo(self, soffice):
+        """Check whether the soffice executable is LibreOffice.
+
+        LibreOffice on POSIX systems accepts "--accept" instead of
+        "-accept" now.
+
+        Returns:
+            True if soffice is LibreOffice, or False otherwise.
+        """
+        # This works for most cases.
+        if soffice.lower().find("libreoffice") != -1:
+            return True
+
+        # Check the symbolic link at /usr/bin/soffice
+        if soffice == "/usr/bin/soffice" and os.path.islink(soffice):
+            if os.readlink(soffice).lower().find("libreoffice") != -1:
+                return True
+
+        # Not found
+        return False
+
+if __name__ == "__main__":
+    main()
