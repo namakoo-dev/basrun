@@ -107,28 +107,59 @@ def port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-def ensure_office(port: int = PORT, timeout: float = 90.0) -> None:
-    """繋がるまで待つ。動いていなければ起こす。
-
-    ★ ここを省くと「落ちていただけ」を別のエラーとして観測することになる。
-    """
-    if port_open(port):
-        return
-    PROFILE.mkdir(parents=True, exist_ok=True)
-    soffice = office_dir() / ("soffice.exe" if os.name == "nt" else "soffice")
-    url = PROFILE.resolve().as_uri()
-    subprocess.Popen(
-        [str(soffice), "--headless", "--norestore", "--nologo",
-         f"--accept=socket,host=127.0.0.1,port={port};urp;",
-         f"-env:UserInstallation={url}"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if port_open(port):
-            time.sleep(1.0)      # listener が立った直後は resolve が失敗する
-            return
+# ★ TCP が開いたことと、UNO で resolve できることは別。
+#   ポートが開いた直後の数秒は resolve が NoConnectException で失敗する。
+#   そこで obasync を呼ぶと、obasync は「繋がらない」と判断して
+#   **既定プロファイルで LibreOffice を起こす**。2026-08-06 に実際に起きた。
+UNO_READY_SRC = r'''
+import sys, time, uno
+from com.sun.star.connection import NoConnectException
+port, timeout = int(sys.argv[1]), float(sys.argv[2])
+local = uno.getComponentContext()
+res = local.ServiceManager.createInstanceWithContext(
+    "com.sun.star.bridge.UnoUrlResolver", local)
+url = "uno:socket,host=127.0.0.1,port=%d;urp;StarOffice.ComponentContext" % port
+deadline = time.time() + timeout
+while time.time() < deadline:
+    try:
+        res.resolve(url)
+        sys.exit(0)
+    except NoConnectException:
         time.sleep(0.5)
-    raise SystemExit(f"LibreOffice が {timeout:.0f} 秒で起動しなかった (port={port})")
+    except Exception:
+        time.sleep(0.5)
+sys.exit(1)
+'''
+
+
+def uno_ready(port: int = PORT, timeout: float = 5.0) -> bool:
+    """★ 実際に resolve できるかを確かめる。TCP が開いているだけでは足りない。"""
+    p = subprocess.run(
+        [str(office_python()), "-c", UNO_READY_SRC, str(port), str(timeout)],
+        capture_output=True, text=True)
+    return p.returncode == 0
+
+
+def ensure_office(port: int = PORT, timeout: float = 90.0) -> None:
+    """UNO で resolve できるまで待つ。動いていなければ起こす。
+
+    ★ 判定を `port_open` にすると足りない。上の UNO_READY_SRC のコメント参照。
+    """
+    if port_open(port) and uno_ready(port, timeout=3.0):
+        return
+    if not port_open(port):
+        PROFILE.mkdir(parents=True, exist_ok=True)
+        soffice = office_dir() / ("soffice.exe" if os.name == "nt" else "soffice")
+        url = PROFILE.resolve().as_uri()
+        subprocess.Popen(
+            [str(soffice), "--headless", "--norestore", "--nologo",
+             f"--accept=socket,host=127.0.0.1,port={port};urp;",
+             f"-env:UserInstallation={url}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if uno_ready(port, timeout=timeout):
+        return
+    raise SystemExit(
+        f"LibreOffice が {timeout:.0f} 秒で UNO 応答しなかった (port={port})")
 
 
 def stop_office(port: int = PORT) -> int:
@@ -163,9 +194,33 @@ def stop_office(port: int = PORT) -> int:
 # ---------------------------------------------------------------------------
 
 def run_obasync(args: list[str]) -> int:
+    """obasync を回す。★ ポートを必ず渡し、繋がることを確かめてから呼ぶ。
+
+    obasync は接続できないと **自分で LibreOffice を起動する** (vendor 側
+    786-790 行の Popen)。そのとき `-env:UserInstallation` も `--headless` も
+    付けないので、**利用者の既定プロファイルが使われる。**
+
+    2026-08-06 に実際に起きた: `-p` を渡し忘れていたため obasync は常に 2002 を
+    見に行き、そこが空だったので自分で既定プロファイルの LibreOffice を起こし、
+    そこへライブラリを書き込んだ。窓も出た。
+
+    だから 2 段で塞ぐ:
+
+    1. `-p` を必ず渡す         -> ensure_office が用意したポートと一致させる
+    2. 呼ぶ直前に接続を確かめる -> 万一空なら **こちらで落とす**。
+                                  obasync に「繋がらない」状況を渡さない
+    """
     if not OBASYNC.exists():
         raise SystemExit(f"同梱の obasync が無い: {OBASYNC}")
     ensure_office()
+    # ★ port_open では足りない。obasync がやるのと同じ resolve で確かめる。
+    if not uno_ready(PORT, timeout=10.0):
+        raise SystemExit(
+            f"LibreOffice が port={PORT} で UNO 応答しない。ここで中止する。\n"
+            "★ このまま obasync を呼ぶと、obasync が resolve に失敗し、"
+            "**既定プロファイルで** LibreOffice を起動して、"
+            "利用者の環境にライブラリを書き込む。")
+    args = ["-p", str(PORT), *args]
     cmd = [str(office_python()), str(OBASYNC), *args]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     # obasync は現行 python で SyntaxWarning を出す (`is` と文字列リテラル)。
