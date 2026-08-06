@@ -275,20 +275,24 @@ def test_pull_book_rescues_embedded_macro_without_touching_original(
 def test_stop_office_is_idempotent_against_a_real_instance(office):
     """実際に動いている LibreOffice を stop → 落ちる → もう一度 stop しても 0。
 
-    ★実測: stop_office() は d.terminate() を投げてすぐ戻る。soffice.bin が
-    実際にポートを手放すまで数百ms〜数秒のずれがあり、戻り値=0 が「もう
-    閉じている」ことを保証しない (呼び出し直後に port_open() すると
-    まだ True になることがあった)。だから閉じたことの確認はポーリングで行う。
+    ★実測 (2026-08-06 以前): stop_office() は d.terminate() を投げてすぐ戻り、
+    soffice.bin が実際にポートを手放すまで数百ms〜数秒のずれがあった。
+    戻り値=0 が「もう閉じている」ことを保証せず、このテストは自分で
+    ポーリングして待っていた —— **待つ側がテストにあるのが誤りだった。**
+
+    実害: 停止の直後に ensure_office() を呼ぶと、まだ開いているポートを見て
+    「動いている」と誤認して起動をやめ、直後にプロセスが消えて次の接続が
+    拒否される。このファイルのテストが**単独では通り通しでは落ちた**のがこれ。
+
+    ★ 待機は basrun.stop_office() 側へ移した。ここで確かめる契約はこう:
+    **戻り値 0 は「もう閉じている」を意味する。** ポーリングはしない ——
+    ここで待つと、待機が道具から消えても気づけない。
     """
     assert office.port_open(TEST_PORT) is True
 
     rc1 = office.stop_office()
     assert rc1 == 0
-
-    deadline = time.time() + 15.0
-    while time.time() < deadline and office.port_open(TEST_PORT):
-        time.sleep(0.5)
-    assert office.port_open(TEST_PORT) is False
+    assert office.port_open(TEST_PORT) is False  # ★ 待たずに、その場で
 
     rc2 = office.stop_office()
     assert rc2 == 0

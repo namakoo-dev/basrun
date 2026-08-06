@@ -162,10 +162,22 @@ def ensure_office(port: int = PORT, timeout: float = 90.0) -> None:
         f"LibreOffice が {timeout:.0f} 秒で UNO 応答しなかった (port={port})")
 
 
-def stop_office(port: int = PORT) -> int:
+def stop_office(port: int = PORT, timeout: float = 20.0) -> int:
     """★ 接続先だけを terminate する。taskkill しない。
 
     taskkill / pkill は利用者が GUI で開いている LibreOffice も巻き込む。
+
+    ★ terminate() は投げたら即座に戻る。soffice.bin が実際に落ちてポートを
+    手放すまでには間がある。**落ちたことを確かめずに「終了させた」と表示
+    していた** —— この道具が扱っている「設定した ≠ 動く」そのものの形。
+
+    2026-08-06 に実害が出た: 停止の直後に `ensure_office()` を呼ぶと、まだ
+    開いたままのポートを見て「動いている」と誤認し、起動をやめる。その直後に
+    プロセスが消えるので、次の接続が拒否される。テストが**単独では通り、
+    通しで走らせると落ちた**のがこれ。`basrun stop` の直後に `apply` を
+    叩く利用者にも同じことが起きる。
+
+    そこで**ポートが実際に閉じるまで待ち、閉じなければそう言う。**
     """
     if not port_open(port):
         print("LibreOffice は動いていない")
@@ -185,8 +197,15 @@ def stop_office(port: int = PORT) -> int:
         "    pass\n"
     )
     subprocess.run([str(office_python()), "-c", code], check=False)
-    print("接続先の LibreOffice を終了させた")
-    return 0
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not port_open(port):
+            print("接続先の LibreOffice を終了させた")
+            return 0
+        time.sleep(0.2)
+    print(f"終了を要求したが、{timeout:.0f} 秒たってもポート {port} が開いたままだ")
+    return 1
 
 
 # ---------------------------------------------------------------------------
