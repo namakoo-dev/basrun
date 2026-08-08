@@ -139,7 +139,8 @@ LibreOffice を起こす。利用者の既定プロファイルには触れな�
 
 ## ライセンス
 
-`vendor/obasync/` は imacat 氏による obasync 0.10 で、Apache License 2.0。
-無改変で同梱しており、著作権表示とライセンス条項はスクリプト冒頭にそのまま残っている。
+basrun 本体（`basrun.py`・テスト・`.bas` ソース）は **MIT License**。全文は `LICENSE`。
 
-それ以外の部分の扱いは未定。
+`vendor/obasync/` は imacat 氏による obasync で **Apache License 2.0**。無改変で同梱し、
+著作権表示とライセンス条項はスクリプト冒頭にそのまま残してある。ライセンス全文は
+`vendor/obasync/LICENSE` にある。MIT と Apache-2.0 は互換で、混在に問題はない。
