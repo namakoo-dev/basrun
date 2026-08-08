@@ -19,17 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-
----------------------------------------------------------------------------
-
-This project vendors a third-party component under a different license:
-
-  vendor/obasync/  —  obasync by imacat <imacat@mail.imacat.idv.tw>
-                      Apache License, Version 2.0
-                      https://pypi.python.org/pypi/obasync
-                      See vendor/obasync/LICENSE for the full license text.
-
-The MIT license above applies to basrun's own code (basrun.py, tests, and the
-.bas sources). It does not cover the vendored obasync component, which remains
-under the Apache License 2.0.
