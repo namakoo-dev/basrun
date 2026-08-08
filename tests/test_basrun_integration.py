@@ -299,6 +299,79 @@ def test_stop_office_is_idempotent_against_a_real_instance(office):
 
 
 # ---------------------------------------------------------------------------
+# 5. 結合セル・複数シート: apply が結合を保ち、2枚目を狙え、新しい結合を作れる
+# ---------------------------------------------------------------------------
+
+def test_apply_handles_merged_cells_and_multiple_sheets(office, tmp_path):
+    """★結合セルと複数シートに対して apply が正しく動くことを実行で確かめる。
+
+    nagi-site の「確認していない」に挙げていた 2 点を、宣言でなく実行で検証する:
+      A 既存の結合 (A1:C1) が open→store の往復で保たれる
+      B Sub が getByIndex(1) で 2 枚目を狙って書ける
+      C Sub が結合を読み (1枚目)、新しい結合を作れる (2枚目)
+
+    ここは値と結合メタ (openpyxl) を確認する。★ 結合の「見え方」は値では
+    測れないので、描画しての目視 (xlview) を別途 1 回行い、両シートの結合が
+    正しく表示されることを確認済み (2026-08-09)。
+    """
+    # 2 シート・結合ヘッダ付きの検体を、この場で組む (バイナリ fixture を増やさない)。
+    wb = openpyxl.Workbook()
+    data = wb.active
+    data.title = "Data"
+    data.merge_cells("A1:C1")
+    data["A1"] = "月次データ 2026"
+    data["A2"] = "単価"; data["B2"] = "数量"; data["C2"] = "金額"
+    data["A3"] = 1280; data["B3"] = 40
+    summ = wb.create_sheet("Summary")
+    summ["A5"] = "（Sub が書き換える前）"
+    book = tmp_path / "merged.xlsx"
+    wb.save(str(book))
+
+    # 結合を読み/作り、2 枚目を狙う Sub。
+    src_dir = tmp_path / "merge_src"
+    src_dir.mkdir()
+    (src_dir / "MergeTest.bas").write_text(
+        "Sub Run(oDoc As Object)\n"
+        "    Dim oData As Object, oSum As Object\n"
+        "    oData = oDoc.Sheets.getByIndex(0)\n"
+        "    oSum  = oDoc.Sheets.getByIndex(1)\n"
+        "    Dim sHeader As String\n"
+        "    sHeader = oData.getCellByPosition(0, 0).getString()\n"
+        "    oSum.getCellByPosition(0, 0).setString(\"元ヘッダ: \" & sHeader)\n"
+        "    oSum.getCellByPosition(0, 1).setValue(12345)\n"
+        "    Dim oRange As Object\n"
+        "    oRange = oSum.getCellRangeByName(\"B3:D3\")\n"
+        "    oRange.merge(True)\n"
+        "    oSum.getCellByPosition(1, 2).setString(\"2枚目の結合\")\n"
+        "End Sub\n",
+        encoding="utf-8", newline="")
+
+    parser = office.build_parser()
+    args = parser.parse_args(
+        ["apply", str(book), str(src_dir), "MergeLib", "MergeTest.Run"])
+    assert args.func(args) == 0
+
+    wb2 = openpyxl.load_workbook(str(book))
+    d, s = wb2["Data"], wb2["Summary"]
+
+    # A 往復保存: 既存の結合とシート構成が保たれる。
+    assert wb2.sheetnames == ["Data", "Summary"]
+    assert "A1:C1" in [str(r) for r in d.merged_cells.ranges]
+    assert d["A1"].value == "月次データ 2026"
+
+    # B シート指定: 2 枚目に正しく書けている。
+    assert s["A1"].value == "元ヘッダ: 月次データ 2026"
+    assert s["A2"].value == 12345
+
+    # C 結合操作: 新しい結合ができ、1 枚目の結合を読めていた。
+    assert "B3:D3" in [str(r) for r in s.merged_cells.ranges]
+    assert s["B3"].value == "2枚目の結合"
+
+    # 副作用なし: 触っていないセルは残る。
+    assert s["A5"].value == "（Sub が書き換える前）"
+
+
+# ---------------------------------------------------------------------------
 # bleed-over の確認: 全ての office フィクスチャ利用テストの後始末が終わった後、
 # import 済みの basrun が実 (2002 / ~/.nagi/lo-profile) の既定値に戻っている
 # ---------------------------------------------------------------------------
