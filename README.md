@@ -52,6 +52,16 @@ End Sub
 （実測: 「読み込んだ / 実行した / 保存した」と全部表示され、セルは 1 つも
 変わっていなかった）。
 
+## Word / PowerPoint（実験的）
+
+`apply` の仕組みは Calc（`.xlsx`/`.ods`）専用ではない。文書を引数で受ける `Sub` であれば、
+Writer（`.docx`）・Impress（`.pptx`）でも同じ流れで動く。`src-doc/Doc.bas`（段落の走査と
+差し替え）・`src-ppt/Deck.bas`（スライド一括の題差し替え・フッタ付与）に例がある。
+
+★ **自動テストがあるのは Calc（`.xlsx`）だけ。** docx/pptx は `tests/word_test.docx`・
+`tests/ppt/deck.pptx`・`tests/ppt/fresh.pptx` を使って手動で動作確認したのみで、
+pytest には組み込んでいない。回帰しても CI では検知できない。
+
 ## 2 つの道具を合わせている
 
 同期は **[obasync](https://pypi.org/project/obasync/)**（imacat 作、Apache-2.0）に
@@ -106,6 +116,8 @@ obasync は常に 2002 を見に行き、そこが空だったので既定プロ
 ## テスト
 
 ```
+pip install pytest openpyxl          # 依存はこの 2 つだけ
+
 python -m pytest tests -q            # 22 件 (単体 16 / 統合 6)
 python -m pytest tests -q -m "not integration"   # LibreOffice が無い環境
 ```
@@ -146,3 +158,7 @@ basrun 本体（`basrun.py`・テスト・`.bas` ソース）は **MIT License**
 `vendor/obasync/` は imacat 氏による obasync で **Apache License 2.0**。無改変で同梱し、
 著作権表示とライセンス条項はスクリプト冒頭にそのまま残してある。ライセンス全文は
 `vendor/obasync/LICENSE` にある。MIT と Apache-2.0 は互換で、混在に問題はない。
+
+コードは AI アシスタント（Nagi）に実装させ、作者が動作を確かめて仕上げたもの。commit の
+著者名もその立て付けのまま（`git log` は `Nagi <nagi@stg.local>`）。プロジェクトの
+著作権者は Namakoo。

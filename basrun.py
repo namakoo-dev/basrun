@@ -313,7 +313,7 @@ def close_book(book: Path, save: bool) -> None:
     _office_py(CLOSE_SRC, str(book), str(PORT), "1" if save else "0")
 
 
-def _obasync_for(a, extra: list[str]) -> int:
+def _obasync_for(a: argparse.Namespace, extra: list[str]) -> int:
     """--book が指定されていれば、文書を開いてから obasync を回す。"""
     lib = a.library or Path(a.dir).resolve().name
     book = Path(a.book).resolve() if getattr(a, "book", None) else None
@@ -335,11 +335,11 @@ def _obasync_for(a, extra: list[str]) -> int:
             close_book(book, save=("--get" not in extra))
 
 
-def sync_cmd(a) -> int:
+def sync_cmd(a: argparse.Namespace) -> int:
     return _obasync_for(a, [])
 
 
-def pull_cmd(a) -> int:
+def pull_cmd(a: argparse.Namespace) -> int:
     Path(a.dir).mkdir(parents=True, exist_ok=True)
     return _obasync_for(a, ["--get"])
 
@@ -379,7 +379,7 @@ print("applied %s.%s.%s -> %s" % (lib, module, sub, book))
 '''
 
 
-def apply_cmd(a) -> int:
+def apply_cmd(a: argparse.Namespace) -> int:
     if "." not in a.entry:
         raise SystemExit("Module.Sub の形で指定すること (例: Amount.FillAmounts)")
     module, sub = a.entry.rsplit(".", 1)
@@ -414,7 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def common(sp):
+    def common(sp: argparse.ArgumentParser) -> argparse.ArgumentParser:
         sp.add_argument("dir", help="ソースを置くディレクトリ")
         sp.add_argument("library", nargs="?", default=None,
                         help="ライブラリ名 (既定: ディレクトリ名)")
