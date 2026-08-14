@@ -9,6 +9,10 @@ basrun apply <book> <dir> <lib> <Module.Sub>   同期して、文書に適用し
 basrun stop                                    起動した LibreOffice を落とす
 ```
 
+> **姉妹版**: [basrun-ts](https://github.com/namakoo-dev/basrun-ts) — この repo の Python
+> ソースを一切読まずに、挙動コーパスだけから実装された TypeScript 移植（移行手法実験の
+> 成果物）。本 repo が正典で、両者は独立に保守される。
+
 ## 何を解いているか
 
 `.xlsx` は仕様としてマクロを格納できない（マクロは `.xlsm` 側）。だから
