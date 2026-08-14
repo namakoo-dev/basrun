@@ -208,3 +208,147 @@ def test_stop_office_is_idempotent_when_nothing_listens():
     s.close()
 
     assert basrun.stop_office(port=closed_port) == 0
+
+
+# ---------------------------------------------------------------------------
+# run_obasync(): 上流 obasync の exit 0 バグへの境界ガード
+#
+# imacat/obasync issue #3 (https://github.com/imacat/obasync/issues/3、
+# 投稿済み): 一部のエラー経路が stderr へ "ERROR:" を出しながら bare
+# `return` で main() を抜けるため、プロセス全体は exit 0 で戻る。
+# ここでは obasync 本体 (vendor/obasync/obasync) は一切呼ばず、
+# subprocess.run をモックしてその状態 (returncode=0 かつ stderr に
+# "ERROR:") を再現する。ensure_office/uno_ready もモックして
+# LibreOffice 不要にする。
+# ---------------------------------------------------------------------------
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_run_obasync_converts_exit0_with_error_stderr_to_nonzero(
+        monkeypatch, capsys):
+    """★上流バグへのガード本体: ERROR: + exit 0 を非ゼロへ変換する。"""
+    monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
+    monkeypatch.setattr(basrun, "uno_ready", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        basrun.subprocess, "run",
+        lambda *a, **kw: _FakeCompletedProcess(
+            0, stderr="ERROR: Found no source macros in somedir\n"))
+
+    rc = basrun.run_obasync(["somedir", "MyLib"])
+
+    assert rc != 0
+    # ★ 握りつぶさない: ERROR: 本文はそのまま利用者の stderr に出る。
+    assert "ERROR: Found no source macros" in capsys.readouterr().err
+
+
+def test_run_obasync_passes_through_a_real_nonzero_exit_unchanged(
+        monkeypatch):
+    """obasync 自身が非ゼロで落ちた場合は、ERROR: 検出を経由せずそのまま返す。"""
+    monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
+    monkeypatch.setattr(basrun, "uno_ready", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        basrun.subprocess, "run",
+        lambda *a, **kw: _FakeCompletedProcess(
+            2, stderr="some other unrelated failure\n"))
+
+    assert basrun.run_obasync(["somedir", "MyLib"]) == 2
+
+
+def test_run_obasync_stays_zero_when_exit0_and_no_error_line(monkeypatch):
+    """正常系: SyntaxWarning が混じっても ERROR: が無ければ 0 のまま。"""
+    monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
+    monkeypatch.setattr(basrun, "uno_ready", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        basrun.subprocess, "run",
+        lambda *a, **kw: _FakeCompletedProcess(
+            0, stdout="Done.  00:01 elapsed.\n",
+            stderr='obasync:123: SyntaxWarning: "is" with a literal\n'))
+
+    assert basrun.run_obasync(["somedir", "MyLib"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# apply_cmd(): opt-in タイムアウト (BASRUN_APPLY_TIMEOUT / --timeout)
+#
+# 生成マクロが無限ループすると apply が永久にハングすることを TS 移行の
+# 実測で確認した。ここでは実際に重いマクロを走らせず、subprocess.run が
+# subprocess.TimeoutExpired を投げる状況を直接モックして再現する
+# (軽量なスリープマクロ相当)。stop_office もモックし、LibreOffice 不要。
+# ---------------------------------------------------------------------------
+
+def _apply_ns(tmp_path, *, timeout):
+    book = tmp_path / "book.xlsx"
+    book.write_bytes(b"fake-xlsx-content")
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    return argparse.Namespace(
+        book=str(book), dir=str(src_dir), library=None, entry="Mod.Sub",
+        ext=".bas", encoding="utf-8", backup=False, timeout=timeout)
+
+
+def test_apply_cmd_default_has_no_timeout_and_passes_none_through(
+        tmp_path, monkeypatch):
+    """★既定は今までどおり無制限。timeout=None がそのまま subprocess.run に渡る。"""
+    monkeypatch.setattr(basrun, "sync_cmd", lambda ns: 0)
+    monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
+    monkeypatch.setattr(basrun, "APPLY_TIMEOUT", None)
+
+    recorded = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        recorded["timeout"] = timeout
+        return _FakeCompletedProcess(0, stdout="applied\n")
+
+    monkeypatch.setattr(basrun.subprocess, "run", fake_run)
+
+    rc = basrun.apply_cmd(_apply_ns(tmp_path, timeout=None))
+
+    assert rc == 0
+    assert recorded["timeout"] is None
+
+
+def test_apply_cmd_falls_back_to_module_apply_timeout_when_flag_omitted(
+        tmp_path, monkeypatch):
+    """--timeout 未指定なら、環境変数由来の basrun.APPLY_TIMEOUT を使う。"""
+    monkeypatch.setattr(basrun, "sync_cmd", lambda ns: 0)
+    monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
+    monkeypatch.setattr(basrun, "APPLY_TIMEOUT", 7.5)
+
+    recorded = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        recorded["timeout"] = timeout
+        return _FakeCompletedProcess(0, stdout="applied\n")
+
+    monkeypatch.setattr(basrun.subprocess, "run", fake_run)
+
+    basrun.apply_cmd(_apply_ns(tmp_path, timeout=None))
+
+    assert recorded["timeout"] == 7.5
+
+
+def test_apply_cmd_on_hang_stops_office_and_raises_systemexit(
+        tmp_path, monkeypatch):
+    """★タイムアウト発火時: 接続先だけ stop_office() で終了し、非ゼロ相当で中止する。"""
+    monkeypatch.setattr(basrun, "sync_cmd", lambda ns: 0)
+    monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
+
+    stopped = {"called": False}
+    monkeypatch.setattr(
+        basrun, "stop_office",
+        lambda *a, **kw: stopped.__setitem__("called", True) or 0)
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        raise basrun.subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    monkeypatch.setattr(basrun.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit):
+        basrun.apply_cmd(_apply_ns(tmp_path, timeout=5.0))
+
+    assert stopped["called"] is True

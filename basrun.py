@@ -67,6 +67,18 @@ PROFILE = Path(os.environ.get(
     "BASRUN_PROFILE", str(Path.home() / ".nagi" / "lo-profile")))
 
 
+def _env_seconds(name: str) -> float | None:
+    """秒指定の環境変数を読む。未設定/空なら None (=無制限)。"""
+    v = os.environ.get(name)
+    return float(v) if v else None
+
+
+# ★ opt-in。既定は今までどおり無制限。生成マクロが無限ループすると apply が
+# 永久にハングすることを TS 移行の実測で確認した (2026-08-14) が、無条件の
+# タイムアウトは「重いが正常に終わる」処理まで巻き込むので既定にはしない。
+APPLY_TIMEOUT = _env_seconds("BASRUN_APPLY_TIMEOUT")
+
+
 # ---------------------------------------------------------------------------
 # LibreOffice の在処と起動
 # ---------------------------------------------------------------------------
@@ -228,6 +240,13 @@ def run_obasync(args: list[str]) -> int:
     1. `-p` を必ず渡す         -> ensure_office が用意したポートと一致させる
     2. 呼ぶ直前に接続を確かめる -> 万一空なら **こちらで落とす**。
                                   obasync に「繋がらない」状況を渡さない
+
+    ★ 3 段目: obasync は失敗時に stderr へ "ERROR:" を出しながら **exit 0**
+    で返ることがある (`main()` 内の 2 箇所が他の 8 箇所と違って `sys.exit(1)`
+    を挟まず bare `return` しているため。imacat/obasync HEAD で現存確認済み、
+    issue 投稿済み: https://github.com/imacat/obasync/issues/3)。exit code
+    だけを見て成功と判断すると、この失敗を握りつぶす。ここで stderr の
+    "ERROR:" も見て非ゼロへ変換する。vendor 本体には手を入れない。
     """
     if not OBASYNC.exists():
         raise SystemExit(f"同梱の obasync が無い: {OBASYNC}")
@@ -244,12 +263,17 @@ def run_obasync(args: list[str]) -> int:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     # obasync は現行 python で SyntaxWarning を出す (`is` と文字列リテラル)。
     # 動作には影響しないので、利用者の目からは落とす。★ それ以外は必ず出す。
+    saw_error = False
     for line in (proc.stderr or "").splitlines():
         if "SyntaxWarning" in line or line.strip().startswith("if storage.type"):
             continue
         print(line, file=sys.stderr)
+        if line.strip().startswith("ERROR:"):
+            saw_error = True
     sys.stdout.write(proc.stdout or "")
-    return proc.returncode
+    if proc.returncode != 0:
+        return proc.returncode
+    return 1 if saw_error else 0
 
 
 OPEN_SRC = r'''
@@ -399,10 +423,22 @@ def apply_cmd(a: argparse.Namespace) -> int:
         print(f"控えを作った: {bak}")
 
     ensure_office()
-    proc = subprocess.run(
-        [str(office_python()), "-c", APPLY_SRC,
-         str(book), lib, module, sub, str(PORT)],
-        capture_output=True, text=True)
+    timeout = a.timeout if a.timeout is not None else APPLY_TIMEOUT
+    try:
+        proc = subprocess.run(
+            [str(office_python()), "-c", APPLY_SRC,
+             str(book), lib, module, sub, str(PORT)],
+            capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # ★ opt-in (既定は無制限、上の APPLY_TIMEOUT のコメント参照)。生成
+        # マクロが無限ループすると、この呼び出しは永久にハングする (TS 移行
+        # での実測)。timeout に達したら、ハングしている接続先の LibreOffice
+        # だけを終了する —— 既存の stop_office() をそのまま再利用するので、
+        # taskkill のようなプロセス名一括終了はしない。
+        stop_office()
+        raise SystemExit(
+            f"apply が {timeout:.0f} 秒応答しなかった (BASRUN_APPLY_TIMEOUT/"
+            "--timeout)。接続先の LibreOffice を終了させて中止した。")
     sys.stdout.write(proc.stdout or "")
     sys.stderr.write(proc.stderr or "")
     return proc.returncode
@@ -442,6 +478,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-x", "--ext", default=".bas")
     ap.add_argument("-e", "--encoding", default="utf-8")
     ap.add_argument("--backup", action="store_true", help="上書き前に .bak を作る")
+    ap.add_argument("--timeout", type=float, default=None,
+                     help="apply がハングしたとみなす秒数 (opt-in、既定は無制限。"
+                          "BASRUN_APPLY_TIMEOUT でも指定できる)")
     ap.set_defaults(func=apply_cmd)
 
     st = sub.add_parser("stop", help="起動した LibreOffice を落とす")

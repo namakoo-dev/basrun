@@ -94,6 +94,14 @@ obasync は常に 2002 を見に行き、そこが空だったので既定プロ
 隔離が効いていることは実測で確認している（別ポート + 別プロファイルで `sync` を
 実行し、ライブラリが隔離側にだけ作られ、既定プロファイルが無変化であること）。
 
+**obasync は失敗時に stderr へ `ERROR:` を出しつつ exit 0 で返ることがある**
+（imacat/obasync HEAD で現存確認済み、issue 投稿済み: [#3](https://github.com/imacat/obasync/issues/3)）。
+`run_obasync()` は exit code に加えて stderr の `ERROR:` も見て非ゼロへ変換する。
+`apply` はさらに、生成マクロの無限ループで永久にハングしうる（TS 移行での実測）。
+既定は今までどおり無制限のまま、`--timeout` / `BASRUN_APPLY_TIMEOUT`（秒）で
+opt-in のタイムアウトを指定できる。発火時は接続先の LibreOffice だけを
+`stop_office()` で終了する（`taskkill` はしない）。
+
 ## 確認していること / していないこと
 
 **実測で確認済み:**
@@ -118,7 +126,7 @@ obasync は常に 2002 を見に行き、そこが空だったので既定プロ
 ```
 pip install pytest openpyxl          # 依存はこの 2 つだけ
 
-python -m pytest tests -q            # 22 件 (単体 16 / 統合 6)
+python -m pytest tests -q            # 28 件 (単体 22 / 統合 6)
 python -m pytest tests -q -m "not integration"   # LibreOffice が無い環境
 ```
 
