@@ -25,6 +25,7 @@ import basrun
 # office_dir()
 # ---------------------------------------------------------------------------
 
+@pytest.mark.office_locator
 def test_office_dir_prefers_basrun_office_env_even_over_real_install(
         tmp_path, monkeypatch):
     """BASRUN_OFFICE が最優先。この開発機に本物の LibreOffice があっても勝つ。"""
@@ -36,6 +37,7 @@ def test_office_dir_prefers_basrun_office_env_even_over_real_install(
     assert basrun.office_dir() == fake_dir
 
 
+@pytest.mark.office_locator
 def test_office_dir_raises_systemexit_mentioning_env_var_when_nothing_found(
         monkeypatch):
     """★見つからない時は BASRUN_OFFICE という逃げ道を必ず案内する。
@@ -55,6 +57,7 @@ def test_office_dir_raises_systemexit_mentioning_env_var_when_nothing_found(
 # office_python()
 # ---------------------------------------------------------------------------
 
+@pytest.mark.office_locator
 def test_office_python_finds_pythonexe(tmp_path, monkeypatch):
     """Windows 名 (python.exe) が候補の先頭。あればそれを返す。"""
     monkeypatch.setattr(basrun, "office_dir", lambda: tmp_path)
@@ -63,6 +66,7 @@ def test_office_python_finds_pythonexe(tmp_path, monkeypatch):
     assert basrun.office_python() == tmp_path / "python.exe"
 
 
+@pytest.mark.office_locator
 def test_office_python_finds_python3_when_no_pythonexe(tmp_path, monkeypatch):
     """python.exe が無ければ python3 (POSIX 系の名前) を試す。"""
     monkeypatch.setattr(basrun, "office_dir", lambda: tmp_path)
@@ -71,6 +75,7 @@ def test_office_python_finds_python3_when_no_pythonexe(tmp_path, monkeypatch):
     assert basrun.office_python() == tmp_path / "python3"
 
 
+@pytest.mark.office_locator
 def test_office_python_raises_systemexit_mentioning_dir_when_missing(
         tmp_path, monkeypatch):
     """候補名が 1 つも無ければ、探したディレクトリを示して落ちる。"""
@@ -229,8 +234,7 @@ class _FakeCompletedProcess:
         self.stderr = stderr
 
 
-def test_run_obasync_converts_exit0_with_error_stderr_to_nonzero(
-        monkeypatch, capsys):
+def test_run_obasync_converts_exit0_with_error_stderr_to_nonzero(fake_office, monkeypatch, capsys):
     """★上流バグへのガード本体: ERROR: + exit 0 を非ゼロへ変換する。"""
     monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
     monkeypatch.setattr(basrun, "uno_ready", lambda *a, **kw: True)
@@ -246,8 +250,7 @@ def test_run_obasync_converts_exit0_with_error_stderr_to_nonzero(
     assert "ERROR: Found no source macros" in capsys.readouterr().err
 
 
-def test_run_obasync_passes_through_a_real_nonzero_exit_unchanged(
-        monkeypatch):
+def test_run_obasync_passes_through_a_real_nonzero_exit_unchanged(fake_office, monkeypatch):
     """obasync 自身が非ゼロで落ちた場合は、ERROR: 検出を経由せずそのまま返す。"""
     monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
     monkeypatch.setattr(basrun, "uno_ready", lambda *a, **kw: True)
@@ -259,7 +262,7 @@ def test_run_obasync_passes_through_a_real_nonzero_exit_unchanged(
     assert basrun.run_obasync(["somedir", "MyLib"]) == 2
 
 
-def test_run_obasync_stays_zero_when_exit0_and_no_error_line(monkeypatch):
+def test_run_obasync_stays_zero_when_exit0_and_no_error_line(fake_office, monkeypatch):
     """正常系: SyntaxWarning が混じっても ERROR: が無ければ 0 のまま。"""
     monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
     monkeypatch.setattr(basrun, "uno_ready", lambda *a, **kw: True)
@@ -291,8 +294,7 @@ def _apply_ns(tmp_path, *, timeout):
         ext=".bas", encoding="utf-8", backup=False, timeout=timeout)
 
 
-def test_apply_cmd_default_has_no_timeout_and_passes_none_through(
-        tmp_path, monkeypatch):
+def test_apply_cmd_default_has_no_timeout_and_passes_none_through(fake_office, tmp_path, monkeypatch):
     """★既定は今までどおり無制限。timeout=None がそのまま subprocess.run に渡る。"""
     monkeypatch.setattr(basrun, "sync_cmd", lambda ns: 0)
     monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
@@ -312,8 +314,7 @@ def test_apply_cmd_default_has_no_timeout_and_passes_none_through(
     assert recorded["timeout"] is None
 
 
-def test_apply_cmd_falls_back_to_module_apply_timeout_when_flag_omitted(
-        tmp_path, monkeypatch):
+def test_apply_cmd_falls_back_to_module_apply_timeout_when_flag_omitted(fake_office, tmp_path, monkeypatch):
     """--timeout 未指定なら、環境変数由来の basrun.APPLY_TIMEOUT を使う。"""
     monkeypatch.setattr(basrun, "sync_cmd", lambda ns: 0)
     monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
@@ -332,8 +333,7 @@ def test_apply_cmd_falls_back_to_module_apply_timeout_when_flag_omitted(
     assert recorded["timeout"] == 7.5
 
 
-def test_apply_cmd_on_hang_stops_office_and_raises_systemexit(
-        tmp_path, monkeypatch):
+def test_apply_cmd_on_hang_stops_office_and_raises_systemexit(fake_office, tmp_path, monkeypatch):
     """★タイムアウト発火時: 接続先だけ stop_office() で終了し、非ゼロ相当で中止する。"""
     monkeypatch.setattr(basrun, "sync_cmd", lambda ns: 0)
     monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
