@@ -1,0 +1,5 @@
+# basrun の単体テストに要るものだけ（実測: tests -m "not integration" 22 件がこれで通る）。
+# 統合テスト（integration マーカー）は実 LibreOffice と、その同梱 Python の uno モジュールを
+# 使う ── pip では入らないため、ここには書かない（CI でも走らせない）。
+openpyxl
+pytest

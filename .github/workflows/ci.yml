@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    # ★ basrun は LibreOffice を headless で駆動する道具。統合テスト（integration マーカー）は
+    #   実 LibreOffice が要るため CI では走らせず、LO 非依存の単体層だけを毎 push 検査する。
+    #   OS は開発環境と同じ windows-latest から始める ── 初回から赤い CI は誰にも読まれなく
+    #   なる（「在っても鳴らない」）ので、確実に緑になる 1 OS で始めて多 OS 化は実測してから。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run unit tests (LibreOffice を要さない範囲)
+        # ★ PYTHONUTF8=1: runner のロケールは cp1252 で、日本語を含む出力の検証が
+        #   UnicodeEncodeError になりうる（ailine の CI で実測済みの罠）。
+        env:
+          PYTHONUTF8: "1"
+        run: python -m pytest tests -q -m "not integration"
