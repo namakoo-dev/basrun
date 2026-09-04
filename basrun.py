@@ -68,15 +68,43 @@ PROFILE = Path(os.environ.get(
 
 
 def _env_seconds(name: str) -> float | None:
-    """秒指定の環境変数を読む。未設定/空なら None (=無制限)。"""
-    v = os.environ.get(name)
-    return float(v) if v else None
+    """秒指定の環境変数を読む。未設定/空/0 なら None (=無制限)。
+
+    ★ 2026-09-04 のレビューで見つけた 2 件:
+      ① 数値でない値を入れると **import 時に traceback で死ぬ** ──
+         `basrun stop` も `--help` も出せなくなる。この repo の他の失敗は
+         すべて理由つきの SystemExit なので、ここだけ作法が違っていた。
+      ② `0` が `0.0` になっていた。`subprocess.run(timeout=0.0)` は即座に
+         打ち切るので、「0＝無制限」と読んだ利用者の apply は必ず失敗する。
+         **0 は無制限**として扱う（無制限を意図した書き方を裏切らない）。
+    """
+    v = (os.environ.get(name) or "").strip()
+    if not v:
+        return None
+    try:
+        seconds = float(v)
+    except ValueError:
+        raise SystemExit(
+            f"環境変数 {name} は秒数で指定すること（今の値: {v!r}）。"
+            "無制限にしたいなら空にするか 0 を入れる。")
+    if seconds < 0:
+        raise SystemExit(f"環境変数 {name} に負の秒数は指定できない（今の値: {v!r}）")
+    return seconds or None
 
 
 # ★ opt-in。既定は今までどおり無制限。生成マクロが無限ループすると apply が
 # 永久にハングすることを TS 移行の実測で確認した (2026-08-14) が、無条件の
 # タイムアウトは「重いが正常に終わる」処理まで巻き込むので既定にはしない。
 APPLY_TIMEOUT = _env_seconds("BASRUN_APPLY_TIMEOUT")
+
+# ★ 2026-09-04: apply 以外の UNO 呼び出し（開く・閉じる・終了要求）も時間を縛れる
+# ようにした。既定は無制限 ── 重いが正常に終わる読み込みを巻き込まないため、
+# APPLY_TIMEOUT と同じ判断に揃える。
+UNO_TIMEOUT = _env_seconds("BASRUN_UNO_TIMEOUT")
+
+# ★ 終了要求だけは**必ず縛る**。ここは「ハングからの復旧」経路で、
+#   縛らないと保険そのものがハングする（下の stop_office のコメント参照）。
+TERMINATE_BUDGET = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +176,7 @@ def uno_ready(port: int = PORT, timeout: float = 5.0) -> bool:
     """★ 実際に resolve できるかを確かめる。TCP が開いているだけでは足りない。"""
     p = subprocess.run(
         [str(office_python()), "-c", UNO_READY_SRC, str(port), str(timeout)],
-        capture_output=True, text=True)
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
     return p.returncode == 0
 
 
@@ -208,7 +236,17 @@ def stop_office(port: int = PORT, timeout: float = 20.0) -> int:
         "except Exception:\n"
         "    pass\n"
     )
-    subprocess.run([str(office_python()), "-c", code], check=False)
+    # ★★ 2026-09-04 のレビューで見つけた穴: ここに時間の縛りが無かった。
+    #   LibreOffice が Basic の実行で本線を塞いでいると、Desktop の生成も
+    #   terminate() も**返ってこない**。stop_office は apply のタイムアウト
+    #   復旧から呼ばれるので、**保険そのものがハングする**形だった。
+    #   ★ 返らなくても諦めない ── ポートが閉じるかどうかは下で別に確かめる
+    #     （terminate が届いていて、応答だけが返らない場合がある）。
+    try:
+        _office_py(code, timeout=min(TERMINATE_BUDGET, timeout))
+    except subprocess.TimeoutExpired:
+        print(f"終了要求が {min(TERMINATE_BUDGET, timeout):.0f} 秒で返らなかった"
+               "（実行中のマクロが本線を塞いでいる可能性がある）。ポートの様子を見る")
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -260,7 +298,8 @@ def run_obasync(args: list[str]) -> int:
             "利用者の環境にライブラリを書き込む。")
     args = ["-p", str(PORT), *args]
     cmd = [str(office_python()), str(OBASYNC), *args]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     # obasync は現行 python で SyntaxWarning を出す (`is` と文字列リテラル)。
     # 動作には影響しないので、利用者の目からは落とす。★ それ以外は必ず出す。
     saw_error = False
@@ -303,22 +342,52 @@ ctx = res.resolve(
 desktop = ctx.ServiceManager.createInstanceWithContext(
     "com.sun.star.frame.Desktop", ctx)
 want = uno.systemPathToFileUrl(book)
+matched, failed = 0, []
 comps = desktop.getComponents().createEnumeration()
 while comps.hasMoreElements():
     c = comps.nextElement()
     try:
-        if c.getURL() == want:
-            if save:
-                c.store()
-            c.close(False)
+        url = c.getURL()
     except Exception:
-        pass
+        continue
+    if url != want:
+        continue
+    matched += 1
+    # ★ 2026-09-04: ここは以前 except Exception: pass で**全部握りつぶして**いた。
+    #   store() が落ちても（読み取り専用・容量不足・排他）呼び出し側は成功と読む。
+    #   この道具が扱っている「成功を報告して何もしていない」そのものの形だった。
+    try:
+        if save:
+            c.store()
+        c.close(False)
+    except Exception as e:
+        failed.append("%s: %s" % (type(e).__name__, e))
+if matched == 0:
+    sys.stderr.write("CLOSE:no-match" + chr(10))
+    sys.exit(2)
+if failed:
+    sys.stderr.write("CLOSE:failed " + "; ".join(failed) + chr(10))
+    sys.exit(1)
+sys.exit(0)
 '''
 
 
-def _office_py(code: str, *args: str) -> subprocess.CompletedProcess:
+def _office_py(code: str, *args: str,
+                timeout: float | None = None) -> subprocess.CompletedProcess:
+    """LibreOffice 同梱 python で短いコードを走らせる。
+
+    ★ 2026-09-04: timeout を通せるようにした。UNO 呼び出しは 5 本あるのに、
+      時間が縛られていたのは apply の 1 本だけで、開く・閉じる・終了要求は
+      LibreOffice が塞がると無言で永久に待っていた。
+      ★ 呼び出し側に散らさず**この 1 箇所**で受ける（同じ判断を写さない）。
+    """
+    # ★ 2026-09-04: 符号化を明示する。text=True だけだと Windows では cp932 で
+    #   復号され、子側が UTF-8 を書いた瞬間に **UnicodeDecodeError で道具ごと落ちる**。
+    #   実際にこのレビューの直しで踏んだ（埋め込みスクリプトに日本語を書いた回）。
+    #   ★ 元から在った穴でもある ── ファイル名や UNO の例外文が非 ASCII なら同じことが起きる。
     return subprocess.run([str(office_python()), "-c", code, *args],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, timeout=timeout,
+                          encoding="utf-8", errors="replace")
 
 
 def open_book(book: Path) -> None:
@@ -327,14 +396,30 @@ def open_book(book: Path) -> None:
     短命なプロセスで開いても、文書は soffice 側に残る (UNO の参照を手放すだけ)。
     """
     ensure_office()
-    p = _office_py(OPEN_SRC, str(book), str(PORT))
+    p = _office_py(OPEN_SRC, str(book), str(PORT), timeout=UNO_TIMEOUT)
     if p.returncode != 0:
         sys.stderr.write(p.stderr or "")
         raise SystemExit(f"文書を開けなかった: {book}")
 
 
-def close_book(book: Path, save: bool) -> None:
-    _office_py(CLOSE_SRC, str(book), str(PORT), "1" if save else "0")
+def close_book(book: Path, save: bool) -> int:
+    """開いた文書を閉じる（sync の回は保存する）。★ 失敗を戻り値で返す。
+
+    ★★ 2026-09-04 のレビューで見つけた穴: 以前は戻り値を捨てており、しかも
+      CLOSE_SRC 側が全例外を握りつぶしていた。つまり
+      **保存できなくても「同期できた」と報告していた**。
+    ★ 0=閉じた / 1=保存か終了に失敗 / 2=対象が開いていなかった。
+      2 も黙らない ── 「探す場所が空なら必ず通る」形を残さない。
+    """
+    p = _office_py(CLOSE_SRC, str(book), str(PORT), "1" if save else "0",
+                   timeout=UNO_TIMEOUT)
+    if p.returncode == 2:
+        print(f"閉じようとした文書が開いていない: {book}", file=sys.stderr)
+    elif p.returncode != 0:
+        detail = (p.stderr or "").replace("CLOSE:failed ", "").strip()
+        print(f"文書を閉じる/保存する側で失敗した: {book}"
+              + (f" ── {detail}" if detail else ""), file=sys.stderr)
+    return p.returncode
 
 
 def _obasync_for(a: argparse.Namespace, extra: list[str]) -> int:
@@ -346,17 +431,25 @@ def _obasync_for(a: argparse.Namespace, extra: list[str]) -> int:
         if not book.exists():
             raise SystemExit(f"文書が無い: {book}")
         open_book(book)
+    rc, crc = 1, 0
     try:
         args = [*extra, "-x", a.ext, "-e", a.encoding,
                 "--doc" if use_doc else "--user"]
         if book:
             # obasync は開いている文書を部分パスで選ぶ
             args += ["--target", book.name]
-        return run_obasync([*args, a.dir, lib])
+        rc = run_obasync([*args, a.dir, lib])
     finally:
         if book:
             # ★ pull は読むだけ。sync は文書側を書き換えるので保存する。
-            close_book(book, save=("--get" not in extra))
+            crc = close_book(book, save=("--get" not in extra))
+    # ★ 2026-09-04: 同期が通っても**閉じる/保存に失敗していたら成功と言わない**。
+    #   finally の中で return を書き換えることはできない（Python は finally の
+    #   代入で戻り値を変えない）ので、閉じた後にここで判定する。
+    if rc == 0 and crc != 0:
+        print("同期はできたが、文書を閉じる/保存する側で失敗した", file=sys.stderr)
+        return crc
+    return rc
 
 
 def sync_cmd(a: argparse.Namespace) -> int:
@@ -428,17 +521,26 @@ def apply_cmd(a: argparse.Namespace) -> int:
         proc = subprocess.run(
             [str(office_python()), "-c", APPLY_SRC,
              str(book), lib, module, sub, str(PORT)],
-            capture_output=True, text=True, timeout=timeout)
+            capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         # ★ opt-in (既定は無制限、上の APPLY_TIMEOUT のコメント参照)。生成
         # マクロが無限ループすると、この呼び出しは永久にハングする (TS 移行
         # での実測)。timeout に達したら、ハングしている接続先の LibreOffice
         # だけを終了する —— 既存の stop_office() をそのまま再利用するので、
         # taskkill のようなプロセス名一括終了はしない。
-        stop_office()
+        # ★★ 2026-09-04: 戻り値を見ずに「終了させた」と断定していた。
+        #   stop_office は落とせなければ 1 を返す ── まさにこの関数の docstring が
+        #   「落ちたことを確かめずに『終了させた』と表示していた」と書いている形が、
+        #   **同じファイルの 2 箇所目で再発していた**（片配線）。
+        rc = stop_office()
+        head = (f"apply が {timeout:.0f} 秒応答しなかった (BASRUN_APPLY_TIMEOUT/"
+                "--timeout)。")
+        if rc == 0:
+            raise SystemExit(head + "接続先の LibreOffice を終了させて中止した。")
         raise SystemExit(
-            f"apply が {timeout:.0f} 秒応答しなかった (BASRUN_APPLY_TIMEOUT/"
-            "--timeout)。接続先の LibreOffice を終了させて中止した。")
+            head + f"★ LibreOffice の終了にも失敗した (port={PORT})。"
+            "手で落とすこと。マクロが無限ループしている可能性がある。")
     sys.stdout.write(proc.stdout or "")
     sys.stderr.write(proc.stderr or "")
     return proc.returncode

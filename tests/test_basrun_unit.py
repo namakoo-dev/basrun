@@ -302,7 +302,9 @@ def test_apply_cmd_default_has_no_timeout_and_passes_none_through(fake_office, t
 
     recorded = {}
 
-    def fake_run(cmd, capture_output, text, timeout=None):
+    # ★ 2026-09-04: 符号化を明示したので引数が増えた。位置引数を数え上げる形だと
+    #   呼び出し側を直すたびに試験が落ちる ── **見たい引数だけ**を名前で受ける。
+    def fake_run(cmd, *a, timeout=None, **kw):
         recorded["timeout"] = timeout
         return _FakeCompletedProcess(0, stdout="applied\n")
 
@@ -322,7 +324,9 @@ def test_apply_cmd_falls_back_to_module_apply_timeout_when_flag_omitted(fake_off
 
     recorded = {}
 
-    def fake_run(cmd, capture_output, text, timeout=None):
+    # ★ 2026-09-04: 符号化を明示したので引数が増えた。位置引数を数え上げる形だと
+    #   呼び出し側を直すたびに試験が落ちる ── **見たい引数だけ**を名前で受ける。
+    def fake_run(cmd, *a, timeout=None, **kw):
         recorded["timeout"] = timeout
         return _FakeCompletedProcess(0, stdout="applied\n")
 
@@ -343,7 +347,9 @@ def test_apply_cmd_on_hang_stops_office_and_raises_systemexit(fake_office, tmp_p
         basrun, "stop_office",
         lambda *a, **kw: stopped.__setitem__("called", True) or 0)
 
-    def fake_run(cmd, capture_output, text, timeout=None):
+    # ★ 2026-09-04: 符号化を明示したので引数が増えた。位置引数を数え上げる形だと
+    #   呼び出し側を直すたびに試験が落ちる ── **見たい引数だけ**を名前で受ける。
+    def fake_run(cmd, *a, timeout=None, **kw):
         raise basrun.subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
     monkeypatch.setattr(basrun.subprocess, "run", fake_run)
