@@ -149,16 +149,79 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     """proc を根に、子孫ごと落とす。★ proc が**まだ生きているうちに**呼ぶこと
     （根が先に死ぬと、孫は親を失って木から外れ、Windows の /T では辿れない）。
     ★ 名前一括（taskkill /IM）はしない ── 無関係なプロセスを巻き込む。"""
+    _kill_pid_tree(proc.pid, group=True)
+
+
+def _kill_pid_tree(pid: int, group: bool = False) -> None:
+    """PID を根に子孫ごと落とす。group=True は POSIX で新しいセッションを作った相手。"""
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=KILL_GRACE)
     else:
         import signal
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            if group:
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+
+
+def _port_owner(port: int) -> int | None:
+    """port を LISTEN しているプロセスの PID（Windows のみ。取れなければ None）。"""
+    if os.name != "nt":
+        return None
+    try:
+        r = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=KILL_GRACE)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if (len(parts) == 5 and parts[0] == "TCP" and parts[1].endswith(f":{port}")
+                and parts[3] == "LISTENING" and parts[4].isdigit()):
+            return int(parts[4])
+    return None
+
+
+def _started_by_us(pid: int) -> bool:
+    """★ その PID が basrun の専用プロファイルで起こした LibreOffice か。
+    違えば落とさない ── 利用者が GUI で開いている LibreOffice を巻き込まない。"""
+    if os.name != "nt":
+        return False
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=KILL_GRACE * 3)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return f"-env:UserInstallation={PROFILE.resolve().as_uri()}" in (r.stdout or "")
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=KILL_GRACE)
+        return str(pid) in (r.stdout or "")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_gone(pid: int, deadline: float) -> bool:
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.2)
+    return not _pid_alive(pid)
 
 
 def _run_bounded(cmd: list, timeout: float | None = None) -> subprocess.CompletedProcess:
@@ -259,9 +322,17 @@ def ensure_office(port: int = PORT, timeout: float = 90.0) -> None:
 
 
 def stop_office(port: int = PORT, timeout: float = 20.0) -> int:
-    """★ 接続先だけを terminate する。taskkill しない。
+    """★ 接続先だけを terminate する。名前一括の taskkill / pkill はしない。
 
     taskkill / pkill は利用者が GUI で開いている LibreOffice も巻き込む。
+
+    ★★ 2026-09-23: terminate が**届かない**回がある（生成マクロが soffice の中で無限ループ
+      して本線を塞いでいる）。その時は誰も soffice を落とさず、以降の実行が全部詰まっていた
+      （ailine の全件が 74 分止まった件の広がり方）。そこで、**port の持ち主の PID** が
+      basrun の専用プロファイルで起こしたものだと確かめられた時だけ、PID 指定で落とす。
+    ★★ 2026-09-23: port が閉じても、soffice はしばらく生きていて**冊のファイルを握っている**
+      （実測: 戻った直後に soffice.bin が残っていた・次の検体の unlink が「使用中」で落ちた）。
+      port でなく**プロセスが消えたこと**で「終了させた」と言う。
 
     ★ terminate() は投げたら即座に戻る。soffice.bin が実際に落ちてポートを
     手放すまでには間がある。**落ちたことを確かめずに「終了させた」と表示
@@ -278,6 +349,8 @@ def stop_office(port: int = PORT, timeout: float = 20.0) -> int:
     if not port_open(port):
         print("LibreOffice は動いていない")
         return 0
+    # ★ 持ち主は**頼む前に**取る ── port が閉じた後では辿れない。
+    owner = _port_owner(port)
     code = (
         "import uno\n"
         "l = uno.getComponentContext()\n"
@@ -307,10 +380,21 @@ def stop_office(port: int = PORT, timeout: float = 20.0) -> int:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not port_open(port):
-            print("接続先の LibreOffice を終了させた")
-            return 0
+            if owner is None or _wait_gone(owner, deadline):
+                print("接続先の LibreOffice を終了させた")
+                return 0
+            break               # port は閉じたが、プロセスがまだ残っている
         time.sleep(0.2)
-    print(f"終了を要求したが、{timeout:.0f} 秒たってもポート {port} が開いたままだ")
+    if owner is not None and _started_by_us(owner):
+        _kill_pid_tree(owner)
+        if _wait_gone(owner, time.monotonic() + KILL_GRACE) and not port_open(port):
+            print(f"終了要求が届かなかったので、basrun が起こした LibreOffice（pid {owner}）を"
+                  "PID 指定で落とした")
+            return 0
+    if port_open(port):
+        print(f"終了を要求したが、{timeout:.0f} 秒たってもポート {port} が開いたままだ")
+    else:
+        print(f"ポート {port} は閉じたが、LibreOffice（pid {owner}）がまだ残っている")
     return 1
 
 

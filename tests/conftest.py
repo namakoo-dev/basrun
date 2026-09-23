@@ -74,4 +74,7 @@ def fake_office(tmp_path, monkeypatch):
     monkeypatch.setattr(basrun, "office_dir", lambda *a, **kw: prog, raising=False)
     monkeypatch.setattr(basrun, "office_python", lambda *a, **kw: prog / "python.exe",
                          raising=False)
+    # ★ 偽の LibreOffice には port の持ち主がいない ── 単体試験が開発機の本物の soffice の
+    #   PID を拾って落とすことを、既定で起こさない。
+    monkeypatch.setattr(basrun, "_port_owner", lambda *a, **kw: None, raising=False)
     return prog

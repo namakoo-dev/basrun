@@ -298,6 +298,33 @@ def test_stop_office_is_idempotent_against_a_real_instance(office):
     assert rc2 == 0
 
 
+def test_a_macro_that_never_ends_leaves_nothing_behind(office, tmp_path):
+    """★★ 2026-09-23: 無限ループの Basic を --timeout で止めた後、soffice も残らず、
+    冊のファイルも手放されていること。
+
+    実測した事故: 時間切れの後も soffice が冊を握ったまま生きていて、次の検体が
+    unlink で「別のプロセスが使用中」になり落ちた（port が閉じた＝終わった、と読んでいた）。
+    さらに terminate が届かない回は soffice が塞がったまま残り、以降が全部詰まった。
+    """
+    import argparse
+    src = tmp_path / "Loop"
+    src.mkdir()
+    (src / "Gen.bas").write_text(
+        "Sub Forever(oDoc As Object)\n    Dim i As Long\n    Do\n        i = i + 1\n"
+        "    Loop\nEnd Sub\n", encoding="utf-8")
+    book = tmp_path / "loop.xlsx"
+    openpyxl.Workbook().save(book)
+    owner = office._port_owner(TEST_PORT)
+    with pytest.raises(SystemExit):
+        office.apply_cmd(argparse.Namespace(
+            book=str(book), dir=str(src), library="Loop", entry="Gen.Forever",
+            ext=".bas", encoding="utf-8", backup=False, timeout=5.0))
+    assert office.port_open(TEST_PORT) is False
+    if owner is not None:
+        assert not office._pid_alive(owner), f"soffice（pid {owner}）が残っている"
+    book.rename(book.with_suffix(".moved"))   # ★ 握られていれば PermissionError
+
+
 # ---------------------------------------------------------------------------
 # 5. 結合セル・複数シート: apply が結合を保ち、2枚目を狙え、新しい結合を作れる
 # ---------------------------------------------------------------------------
