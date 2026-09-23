@@ -141,6 +141,59 @@ def office_python() -> Path:
         "(python3-uno 等) になっていることがある。")
 
 
+# ★ 木ごと kill した後、管が閉じるのを待つ上限（それでも孫が残る環境でも戻るため）。
+KILL_GRACE = 10.0
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """proc を根に、子孫ごと落とす。★ proc が**まだ生きているうちに**呼ぶこと
+    （根が先に死ぬと、孫は親を失って木から外れ、Windows の /T では辿れない）。
+    ★ 名前一括（taskkill /IM）はしない ── 無関係なプロセスを巻き込む。"""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=KILL_GRACE)
+    else:
+        import signal
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _run_bounded(cmd: list, timeout: float | None = None) -> subprocess.CompletedProcess:
+    """cmd を走らせ、timeout を過ぎたら**本当に戻る**（子孫ごと落としてから）。
+
+    ★★ 2026-09-23（実測）: Windows の LibreOffice 同梱 python.exe は**ランチャー**で、
+      コードは孫の python-core で動く（Popen の pid 17992 に対し、中の pid 4644 の親が 17992）。
+      subprocess.run(timeout=...) が時間切れで kill するのは**ランチャーだけ**で、
+      孫は生き残り、出力の管を握ったまま run() を待たせ続ける。
+      実測: timeout=3 で 25 秒眠るスクリプトを呼ぶと、例外まで **25.0 秒**かかった。
+      soffice が塞がっていれば、これは永遠になる（ailine の全件が 74 分止まった）。
+    ★★ 2026-09-04 に付けた timeout は**すべて**この理由で効いていなかった。
+      試験は「timeout を渡したか」を見ていて、「時間どおりに戻るか」を見ていなかった。
+    """
+    kw = {} if os.name == "nt" else {"start_new_session": True}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", **kw)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err) from None
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def run_office(args: list, timeout: float | None = None) -> subprocess.CompletedProcess:
+    """LibreOffice 同梱 python を走らせる**唯一の口**。★ 呼び出し側で subprocess を叩かない
+    （4 箇所が同じ形で叩いていて、4 箇所とも時間切れが効いていなかった）。"""
+    return _run_bounded([str(office_python()), *args], timeout=timeout)
+
+
 def port_open(port: int) -> bool:
     with socket.socket() as s:
         s.settimeout(0.5)
@@ -174,9 +227,12 @@ sys.exit(1)
 
 def uno_ready(port: int = PORT, timeout: float = 5.0) -> bool:
     """★ 実際に resolve できるかを確かめる。TCP が開いているだけでは足りない。"""
-    p = subprocess.run(
-        [str(office_python()), "-c", UNO_READY_SRC, str(port), str(timeout)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # ★ 中のスクリプトは自分で timeout 秒まで試す。外側はそれに猶予を足した上限で縛る。
+    try:
+        p = run_office(["-c", UNO_READY_SRC, str(port), str(timeout)],
+                       timeout=timeout + KILL_GRACE)
+    except subprocess.TimeoutExpired:
+        return False
     return p.returncode == 0
 
 
@@ -297,9 +353,7 @@ def run_obasync(args: list[str]) -> int:
             "**既定プロファイルで** LibreOffice を起動して、"
             "利用者の環境にライブラリを書き込む。")
     args = ["-p", str(PORT), *args]
-    cmd = [str(office_python()), str(OBASYNC), *args]
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+    proc = run_office([str(OBASYNC), *args])
     # obasync は現行 python で SyntaxWarning を出す (`is` と文字列リテラル)。
     # 動作には影響しないので、利用者の目からは落とす。★ それ以外は必ず出す。
     saw_error = False
@@ -385,9 +439,7 @@ def _office_py(code: str, *args: str,
     #   復号され、子側が UTF-8 を書いた瞬間に **UnicodeDecodeError で道具ごと落ちる**。
     #   実際にこのレビューの直しで踏んだ（埋め込みスクリプトに日本語を書いた回）。
     #   ★ 元から在った穴でもある ── ファイル名や UNO の例外文が非 ASCII なら同じことが起きる。
-    return subprocess.run([str(office_python()), "-c", code, *args],
-                          capture_output=True, text=True, timeout=timeout,
-                          encoding="utf-8", errors="replace")
+    return run_office(["-c", code, *args], timeout=timeout)
 
 
 def open_book(book: Path) -> None:
@@ -518,11 +570,8 @@ def apply_cmd(a: argparse.Namespace) -> int:
     ensure_office()
     timeout = a.timeout if a.timeout is not None else APPLY_TIMEOUT
     try:
-        proc = subprocess.run(
-            [str(office_python()), "-c", APPLY_SRC,
-             str(book), lib, module, sub, str(PORT)],
-            capture_output=True, text=True, timeout=timeout,
-            encoding="utf-8", errors="replace")
+        proc = run_office(["-c", APPLY_SRC, str(book), lib, module, sub, str(PORT)],
+                          timeout=timeout)
     except subprocess.TimeoutExpired:
         # ★ opt-in (既定は無制限、上の APPLY_TIMEOUT のコメント参照)。生成
         # マクロが無限ループすると、この呼び出しは永久にハングする (TS 移行

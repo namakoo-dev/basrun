@@ -97,7 +97,7 @@ def test_apply_tells_the_truth_about_whether_office_was_stopped(
     def _boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd="apply", timeout=1)
 
-    monkeypatch.setattr(basrun.subprocess, "run", _boom)
+    monkeypatch.setattr(basrun, "_run_bounded", _boom)
     with pytest.raises(SystemExit) as e:
         basrun.apply_cmd(_apply_ns(tmp_path, 1.0))
     msg = str(e.value)

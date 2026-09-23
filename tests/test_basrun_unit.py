@@ -239,7 +239,7 @@ def test_run_obasync_converts_exit0_with_error_stderr_to_nonzero(fake_office, mo
     monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
     monkeypatch.setattr(basrun, "uno_ready", lambda *a, **kw: True)
     monkeypatch.setattr(
-        basrun.subprocess, "run",
+        basrun, "_run_bounded",
         lambda *a, **kw: _FakeCompletedProcess(
             0, stderr="ERROR: Found no source macros in somedir\n"))
 
@@ -255,7 +255,7 @@ def test_run_obasync_passes_through_a_real_nonzero_exit_unchanged(fake_office, m
     monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
     monkeypatch.setattr(basrun, "uno_ready", lambda *a, **kw: True)
     monkeypatch.setattr(
-        basrun.subprocess, "run",
+        basrun, "_run_bounded",
         lambda *a, **kw: _FakeCompletedProcess(
             2, stderr="some other unrelated failure\n"))
 
@@ -267,7 +267,7 @@ def test_run_obasync_stays_zero_when_exit0_and_no_error_line(fake_office, monkey
     monkeypatch.setattr(basrun, "ensure_office", lambda *a, **kw: None)
     monkeypatch.setattr(basrun, "uno_ready", lambda *a, **kw: True)
     monkeypatch.setattr(
-        basrun.subprocess, "run",
+        basrun, "_run_bounded",
         lambda *a, **kw: _FakeCompletedProcess(
             0, stdout="Done.  00:01 elapsed.\n",
             stderr='obasync:123: SyntaxWarning: "is" with a literal\n'))
@@ -308,7 +308,7 @@ def test_apply_cmd_default_has_no_timeout_and_passes_none_through(fake_office, t
         recorded["timeout"] = timeout
         return _FakeCompletedProcess(0, stdout="applied\n")
 
-    monkeypatch.setattr(basrun.subprocess, "run", fake_run)
+    monkeypatch.setattr(basrun, "_run_bounded", fake_run)
 
     rc = basrun.apply_cmd(_apply_ns(tmp_path, timeout=None))
 
@@ -330,7 +330,7 @@ def test_apply_cmd_falls_back_to_module_apply_timeout_when_flag_omitted(fake_off
         recorded["timeout"] = timeout
         return _FakeCompletedProcess(0, stdout="applied\n")
 
-    monkeypatch.setattr(basrun.subprocess, "run", fake_run)
+    monkeypatch.setattr(basrun, "_run_bounded", fake_run)
 
     basrun.apply_cmd(_apply_ns(tmp_path, timeout=None))
 
@@ -352,7 +352,7 @@ def test_apply_cmd_on_hang_stops_office_and_raises_systemexit(fake_office, tmp_p
     def fake_run(cmd, *a, timeout=None, **kw):
         raise basrun.subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
-    monkeypatch.setattr(basrun.subprocess, "run", fake_run)
+    monkeypatch.setattr(basrun, "_run_bounded", fake_run)
 
     with pytest.raises(SystemExit):
         basrun.apply_cmd(_apply_ns(tmp_path, timeout=5.0))
