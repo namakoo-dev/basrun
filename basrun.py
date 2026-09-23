@@ -316,7 +316,11 @@ def ensure_office(port: int = PORT, timeout: float = 90.0) -> None:
             [str(soffice), "--headless", "--norestore", "--nologo",
              f"--accept=socket,host=127.0.0.1,port={port};urp;",
              f"-env:UserInstallation={url}"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            # ★ 2026-09-23: 今いるフォルダを専用プロファイルに固定する ── soffice は長く生きるので、
+            #   起こした時の今いるフォルダ（試験の一時フォルダ等）を握り続け、Windows ではそのフォルダが
+            #   消せなくなった（ailine の断りの盤の片付けが「使用中」で落ちた）。
+            cwd=str(PROFILE))
     if uno_ready(port, timeout=timeout):
         return
     raise SystemExit(
