@@ -84,3 +84,26 @@ def test_it_waits_for_the_process_before_saying_stopped(fake_office, monkeypatch
     assert basrun.stop_office(port=1, timeout=5.0) == 0
     assert len(polls) >= 4, f"プロセスの生死を見ずに終了と言った（見た回数 {len(polls)}）"
     assert "終了させた" in capsys.readouterr().out
+
+
+def test_a_sync_that_never_returns_is_bounded_and_clears_the_blockage(fake_office, monkeypatch):
+    """★★ 2026-09-23: 同期（obasync）だけ時間の縛りが無く、塞がった soffice を待ち続けた。
+    呼ぶ側の時間切れが basrun を殺しても soffice は子でないので残り、次の実行も詰まった
+    （ailine の pre-push の素の環境で、歩きが 1 件ずつ 210 秒の時間切れを繰り返した）。
+    ★ 既定（BASRUN_UNO_TIMEOUT 無し）でも必ず縛り、時間切れなら stop_office で塞がりを取り除く。"""
+    import pytest
+    seen = {}
+    monkeypatch.setattr(basrun, "ensure_office", lambda *a, **k: None)
+    monkeypatch.setattr(basrun, "uno_ready", lambda *a, **k: True)
+    monkeypatch.setattr(basrun, "UNO_TIMEOUT", None)
+
+    def _hang(cmd, timeout=None):
+        seen["timeout"] = timeout
+        raise subprocess.TimeoutExpired(cmd="obasync", timeout=timeout)
+    monkeypatch.setattr(basrun, "_run_bounded", _hang)
+    monkeypatch.setattr(basrun, "stop_office", lambda *a, **k: seen.setdefault("stopped", True) and 0)
+    with pytest.raises(SystemExit) as e:
+        basrun.run_obasync(["somedir", "MyLib"])
+    assert seen.get("timeout") == basrun.SYNC_TIMEOUT, f"既定で縛っていない: {seen}"
+    assert seen.get("stopped"), "時間切れの後に塞がりを取り除いていない"
+    assert "応答しなかった" in str(e.value), e.value

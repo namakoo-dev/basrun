@@ -101,6 +101,8 @@ APPLY_TIMEOUT = _env_seconds("BASRUN_APPLY_TIMEOUT")
 # ようにした。既定は無制限 ── 重いが正常に終わる読み込みを巻き込まないため、
 # APPLY_TIMEOUT と同じ判断に揃える。
 UNO_TIMEOUT = _env_seconds("BASRUN_UNO_TIMEOUT")
+#: ★ 同期（obasync）の既定の縛り。UNO_TIMEOUT が無い（無制限）時でも同期だけは必ず縛る（2026-09-23）。
+SYNC_TIMEOUT = 120.0
 
 # ★ 終了要求だけは**必ず縛る**。ここは「ハングからの復旧」経路で、
 #   縛らないと保険そのものがハングする（下の stop_office のコメント参照）。
@@ -437,7 +439,21 @@ def run_obasync(args: list[str]) -> int:
             "**既定プロファイルで** LibreOffice を起動して、"
             "利用者の環境にライブラリを書き込む。")
     args = ["-p", str(PORT), *args]
-    proc = run_office([str(OBASYNC), *args])
+    # ★★ 2026-09-23: 同期の段だけ時間の縛りが無かった（1d81e1d で他の 3 か所を縛った時の取り残し）。
+    #   soffice が塞がると、ここが無制限に待ち、呼ぶ側（ailine）の外側の時間切れが basrun を殺しても
+    #   **soffice は basrun の子でないので残り**、次の実行も同じ所で詰まった
+    #   （ailine の pre-push の素の環境で、断りの盤の歩きが 1 件ずつ 210 秒の時間切れを繰り返した）。
+    #   ★ 縛りは BASRUN_UNO_TIMEOUT（既定は無制限なので、同期だけは既定 SYNC_TIMEOUT=120 秒で必ず縛る ──
+    #     同期は数秒で終わる段。時間切れなら stop_office で塞がりを取り除く）。
+    limit = UNO_TIMEOUT or SYNC_TIMEOUT
+    try:
+        proc = run_office([str(OBASYNC), *args], timeout=limit)
+    except subprocess.TimeoutExpired:
+        rc = stop_office()
+        raise SystemExit(
+            f"同期（obasync）が {limit:.0f} 秒応答しなかった (BASRUN_UNO_TIMEOUT)。"
+            + ("接続先の LibreOffice を終了させて中止した。" if rc == 0 else
+               f"★ LibreOffice の終了にも失敗した (port={PORT})。手で落とすこと。"))
     # obasync は現行 python で SyntaxWarning を出す (`is` と文字列リテラル)。
     # 動作には影響しないので、利用者の目からは落とす。★ それ以外は必ず出す。
     saw_error = False
